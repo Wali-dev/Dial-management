@@ -5,6 +5,10 @@ export const STATUS_COL = 'coming_date'
 // Column that stores the overall lead status; updated whenever the coming date changes.
 export const LEAD_STATUS_COL = 'lead_status'
 export const LEAD_STATUS_SCHEDULED = 'scheduled'
+// Extra column added to exports that combine leads from several files.
+export const SOURCE_FILE_COL = 'source_file'
+// Fields a manually added student can have, and the header used if the sheet lacks one.
+const MANUAL_FIELDS = { name: 'name', phone: 'phone_number', email: 'email' }
 
 // Candidate header names for each field we display. First match wins.
 const FIELD_MATCHERS = {
@@ -82,14 +86,42 @@ export function parseWorkbook(buffer) {
       originalLeadStatus: get(leadStatusColIdx),
     })
   }
-  return { workbook, sheetName, headers, leads, statusColIdx, leadStatusColIdx }
+  return { workbook, sheetName, headers, leads, statusColIdx, leadStatusColIdx, fieldCols: cols }
+}
+
+/** Row index (0-based) for the next row appended to the workbook's sheet. */
+export function nextRowIndex({ workbook, sheetName }, leads) {
+  const ref = workbook.Sheets[sheetName]['!ref']
+  const lastRow = ref ? XLSX.utils.decode_range(ref).e.r : 0
+  return Math.max(lastRow, ...leads.map((l) => l.rowIndex)) + 1
+}
+
+/** Build a lead for a student added by hand. Every field is optional. */
+export function makeManualLead({ name = '', phone = '', email = '' }, fileId, rowIndex, status) {
+  return {
+    rowIndex,
+    fileId,
+    isNew: true, // its name/phone/email cells still need writing to the sheet
+    name: name.trim(),
+    email: email.trim(),
+    phone: normalisePhone(phone),
+    address: '',
+    education: '',
+    age: '',
+    currentStatus: '',
+    status: status || '',
+    leadStatus: status ? LEAD_STATUS_SCHEDULED : '',
+    originalLeadStatus: '',
+  }
 }
 
 /** Write a column of values into the sheet (adding the column if needed). Returns its index. */
 function writeColumn(ws, range, headers, colIdx, header, leads, value) {
   let col = colIdx
-  if (col === -1) col = Math.max(range.e.c + 1, headers.length)
-  ws[XLSX.utils.encode_cell({ r: 0, c: col })] = { t: 's', v: header }
+  if (col === -1) {
+    col = Math.max(range.e.c + 1, headers.length)
+    ws[XLSX.utils.encode_cell({ r: 0, c: col })] = { t: 's', v: header }
+  }
   for (const lead of leads) {
     const addr = XLSX.utils.encode_cell({ r: lead.rowIndex, c: col })
     const v = value(lead)
@@ -97,12 +129,16 @@ function writeColumn(ws, range, headers, colIdx, header, leads, value) {
     else delete ws[addr]
   }
   if (col > range.e.c) range.e.c = col
+  for (const lead of leads) if (lead.rowIndex > range.e.r) range.e.r = lead.rowIndex
   return col
 }
 
-/** Write coming dates and lead statuses into the sheet and return xlsx bytes. */
+/**
+ * Write coming dates, lead statuses and any manually added students into the sheet.
+ * Returns the xlsx bytes plus the updated column layout to merge back into the book meta.
+ */
 export function buildUpdatedWorkbook(
-  { workbook, sheetName, headers, statusColIdx, leadStatusColIdx },
+  { workbook, sheetName, headers, statusColIdx, leadStatusColIdx, fieldCols = {} },
   leads,
 ) {
   const ws = workbook.Sheets[sheetName]
@@ -117,30 +153,95 @@ export function buildUpdatedWorkbook(
     leads,
     (l) => l.leadStatus,
   )
+  const nextHeaders = [...headers]
+  nextHeaders[col] = STATUS_COL
+  nextHeaders[leadCol] = LEAD_STATUS_COL
+  const nextFieldCols = { ...fieldCols }
+  const manual = leads.filter((l) => l.isNew)
+  if (manual.length) {
+    for (const [field, header] of Object.entries(MANUAL_FIELDS)) {
+      const existing = fieldCols[field] ?? -1
+      const c = writeColumn(ws, range, nextHeaders, existing, header, manual, (l) => l[field])
+      nextFieldCols[field] = c
+      if (existing === -1) nextHeaders[c] = header
+    }
+  }
   ws['!ref'] = XLSX.utils.encode_range(range)
 
-  return { bytes: XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }), col, leadCol }
+  return {
+    bytes: XLSX.write(workbook, { bookType: 'xlsx', type: 'array' }),
+    meta: {
+      statusColIdx: col,
+      leadStatusColIdx: leadCol,
+      headers: nextHeaders,
+      fieldCols: nextFieldCols,
+    },
+  }
 }
 
 /**
- * Download a new .xlsx containing only the given leads: every original column from the
- * source sheet, with coming_date / lead_status reflecting the current (possibly unsaved) values.
+ * Download a new .xlsx containing only the given leads, which may come from several
+ * source workbooks. Columns are the union of every source sheet's headers (matched by
+ * name), with coming_date / lead_status reflecting the current (possibly unsaved) values.
+ * When the leads span more than one file a source_file column is added.
+ *
+ * `files` is a Map of fileId -> { book, fileName }.
  */
-export function exportLeads({ workbook, sheetName }, leads, fileName) {
-  const ws = workbook.Sheets[sheetName]
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true })
-  const headers = rows[0].map((h) => String(h))
-  let statusIdx = headers.findIndex((h) => h.trim() === STATUS_COL)
-  if (statusIdx === -1) statusIdx = headers.push(STATUS_COL) - 1
-  let leadStatusIdx = headers.findIndex((h) => h.trim() === LEAD_STATUS_COL)
-  if (leadStatusIdx === -1) leadStatusIdx = headers.push(LEAD_STATUS_COL) - 1
+export function exportLeads(files, leads, fileName) {
+  const sheets = new Map() // fileId -> { rows, colMap }
+  const headers = []
+  const headerIdx = new Map()
+  // Recognised fields (name, phone, ...) share one column even when files name them
+  // differently; the first file's header wins.
+  const fieldHeader = new Map()
+  const addHeader = (h) => {
+    if (!headerIdx.has(h)) headerIdx.set(h, headers.push(h) - 1)
+    return headerIdx.get(h)
+  }
+
+  for (const lead of leads) {
+    if (sheets.has(lead.fileId)) continue
+    const { workbook, sheetName, fieldCols = {} } = files.get(lead.fileId).book
+    const fieldOf = new Map(Object.entries(fieldCols).map(([field, idx]) => [idx, field]))
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      defval: '',
+      raw: true,
+    })
+    // Map each source column to its position in the combined header row.
+    const colMap = (rows[0] || []).map((h, i) => {
+      let name = String(h).trim()
+      const field = fieldOf.get(i)
+      if (field && name) {
+        if (!fieldHeader.has(field)) fieldHeader.set(field, name)
+        name = fieldHeader.get(field)
+      }
+      return name ? addHeader(name) : -1
+    })
+    sheets.set(lead.fileId, { rows, colMap })
+  }
+  const statusIdx = addHeader(STATUS_COL)
+  const leadStatusIdx = addHeader(LEAD_STATUS_COL)
+  const sourceIdx = sheets.size > 1 ? addHeader(SOURCE_FILE_COL) : -1
 
   const out = [headers]
   for (const lead of leads) {
-    const row = [...(rows[lead.rowIndex] || [])]
-    while (row.length < headers.length) row.push('')
+    const { rows, colMap } = sheets.get(lead.fileId)
+    const src = rows[lead.rowIndex] || []
+    const row = new Array(headers.length).fill('')
+    colMap.forEach((to, from) => {
+      if (to !== -1 && src[from] !== undefined) row[to] = src[from]
+    })
     row[statusIdx] = lead.status
     row[leadStatusIdx] = lead.leadStatus
+    if (sourceIdx !== -1) row[sourceIdx] = files.get(lead.fileId).fileName
+    if (lead.isNew) {
+      // Manually added: the sheet may not hold this row yet, so take values from the lead.
+      for (const [field, header] of Object.entries(MANUAL_FIELDS)) {
+        if (!fieldHeader.has(field)) fieldHeader.set(field, header)
+        row[addHeader(fieldHeader.get(field))] = lead[field]
+      }
+    }
     out.push(row)
   }
 

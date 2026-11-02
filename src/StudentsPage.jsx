@@ -7,6 +7,7 @@ import LeadCard from './LeadCard'
  */
 export default function StudentsPage({
   leads,
+  filesById,
   indices,
   pos,
   onPosChange,
@@ -70,6 +71,7 @@ export default function StudentsPage({
 
       <LeadCard
         lead={lead}
+        sourceFile={filesById?.get(lead.fileId)?.fileName}
         dateButtons={dateButtons}
         onSetStatus={(value) => onSetStatus(leadIndex, value)}
         onAddDateButton={onAddDateButton}

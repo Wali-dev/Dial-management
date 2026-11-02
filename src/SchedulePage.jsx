@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { dialNumber } from './xlsxUtils'
 import { ALL, UNSCHEDULED, filterLabel, filterLeads } from './scheduleFilter'
 
@@ -9,6 +9,7 @@ import { ALL, UNSCHEDULED, filterLabel, filterLeads } from './scheduleFilter'
  */
 export default function SchedulePage({
   leads,
+  files,
   dateButtons,
   filter,
   onFilterChange,
@@ -16,7 +17,9 @@ export default function SchedulePage({
   onOpenLead,
   onExport,
   onSeeStudents,
+  onAddStudent,
 }) {
+  const [adding, setAdding] = useState(false)
   // Count leads per coming date, ordered like the dashboard's date buttons,
   // followed by any dates that only exist in the file.
   const dateCounts = useMemo(() => {
@@ -30,6 +33,8 @@ export default function SchedulePage({
   const scheduledCount = useMemo(() => leads.filter((l) => l.status).length, [leads])
   const unscheduledCount = leads.length - scheduledCount
   const rows = useMemo(() => filterLeads(leads, filter), [leads, filter])
+  const multiFile = files.length > 1
+  const fileNames = useMemo(() => new Map(files.map((f) => [f.id, f.fileName])), [files])
 
   const setDate = (date) => onFilterChange({ ...filter, date })
 
@@ -64,10 +69,14 @@ export default function SchedulePage({
         <div className="summary-side">
           <div className="summary-meta">
             {scheduledCount} scheduled · {unscheduledCount} not scheduled · {leads.length} total
+            {multiFile && ` · from ${files.length} files`}
           </div>
           <div className="summary-actions">
             <button className="btn" onClick={() => onExport(rows)} disabled={rows.length === 0}>
               Export filtered (.xlsx)
+            </button>
+            <button className="btn" onClick={() => setAdding((v) => !v)} aria-expanded={adding}>
+              + Add student
             </button>
             <button className="btn btn-primary" onClick={onSeeStudents} disabled={rows.length === 0}>
               See students
@@ -75,6 +84,16 @@ export default function SchedulePage({
           </div>
         </div>
       </section>
+
+      {adding && (
+        <AddStudentForm
+          files={files}
+          // Students added while viewing a date get that date, so they show up right away.
+          status={filter.date !== ALL && filter.date !== UNSCHEDULED ? filter.date : ''}
+          onAdd={onAddStudent}
+          onClose={() => setAdding(false)}
+        />
+      )}
 
       <section className="filters">
         <div className="chips">
@@ -104,11 +123,12 @@ export default function SchedulePage({
                 <th>Coming date</th>
                 <th>Education</th>
                 <th>Address</th>
+                {multiFile && <th>File</th>}
               </tr>
             </thead>
             <tbody>
               {rows.map(({ lead, index }, i) => (
-                <tr key={lead.rowIndex} onClick={() => onOpenLead(index)} title="Open in dashboard">
+                <tr key={`${lead.fileId}:${lead.rowIndex}`} onClick={() => onOpenLead(index)} title="Open in dashboard">
                   <td className="num">{i + 1}</td>
                   <td className="strong">{lead.name || 'Unnamed lead'}</td>
                   <td className="num">
@@ -129,6 +149,7 @@ export default function SchedulePage({
                   </td>
                   <td>{lead.education || '—'}</td>
                   <td className="wrap">{lead.address || '—'}</td>
+                  {multiFile && <td className="muted">{fileNames.get(lead.fileId)}</td>}
                 </tr>
               ))}
             </tbody>
@@ -136,5 +157,68 @@ export default function SchedulePage({
         </div>
       )}
     </main>
+  )
+}
+
+const EMPTY_STUDENT = { name: '', phone: '', email: '' }
+
+/** Inline form for adding a student by hand. Every field is optional. */
+function AddStudentForm({ files, status, onAdd, onClose }) {
+  const [values, setValues] = useState(EMPTY_STUDENT)
+  const [fileId, setFileId] = useState(files[0]?.id)
+  const set = (key) => (e) => setValues((v) => ({ ...v, [key]: e.target.value }))
+
+  const submit = (e) => {
+    e.preventDefault()
+    if (onAdd({ ...values, fileId, status })) setValues(EMPTY_STUDENT)
+  }
+
+  return (
+    <form className="add-student" onSubmit={submit}>
+      <div className="add-student-fields">
+        <input value={values.name} onChange={set('name')} placeholder="Name" aria-label="Name" autoFocus />
+        <input
+          value={values.phone}
+          onChange={set('phone')}
+          placeholder="Phone"
+          aria-label="Phone"
+          type="tel"
+          inputMode="tel"
+        />
+        <input
+          value={values.email}
+          onChange={set('email')}
+          placeholder="Email"
+          aria-label="Email"
+          type="email"
+        />
+        {files.length > 1 && (
+          <select
+            value={fileId}
+            onChange={(e) => setFileId(Number(e.target.value))}
+            aria-label="Add to file"
+            title="File the student is saved into"
+          >
+            {files.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.fileName}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      <div className="add-student-actions">
+        <span className="add-student-hint">
+          {status ? `Will be scheduled for ${status}` : 'Will be added as not scheduled'} · all fields
+          optional
+        </span>
+        <button type="button" className="link" onClick={onClose}>
+          Close
+        </button>
+        <button type="submit" className="btn btn-primary">
+          Add student
+        </button>
+      </div>
+    </form>
   )
 }

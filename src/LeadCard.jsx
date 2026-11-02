@@ -3,7 +3,14 @@ import { QRCodeSVG } from 'qrcode.react'
 import { dialNumber } from './xlsxUtils'
 
 /** The dial card: QR code, lead details and coming-date buttons. Shared by dashboard and students page. */
-export default function LeadCard({ lead, dateButtons, onSetStatus, onAddDateButton, onRemoveDateButton }) {
+export default function LeadCard({
+  lead,
+  sourceFile,
+  dateButtons,
+  onSetStatus,
+  onAddDateButton,
+  onRemoveDateButton,
+}) {
   const [newLabel, setNewLabel] = useState('')
   const [editMode, setEditMode] = useState(false)
 
@@ -50,6 +57,12 @@ export default function LeadCard({ lead, dateButtons, onSetStatus, onAddDateButt
               <span className="badge badge-muted">Not set</span>
             )}
           </dd>
+          {sourceFile && (
+            <>
+              <dt>Source file</dt>
+              <dd>{sourceFile}</dd>
+            </>
+          )}
           <dt>Coming date</dt>
           <dd>
             {lead.status ? (
